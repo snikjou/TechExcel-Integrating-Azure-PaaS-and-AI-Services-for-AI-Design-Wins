@@ -8,8 +8,15 @@ using Microsoft.Data.SqlClient;
 using Azure.AI.OpenAI;
 using Azure;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
+using Microsoft.SemanticKernel.ChatCompletion;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration
+    .AddUserSecrets<Program>()
+    .AddEnvironmentVariables();
 
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
@@ -43,6 +50,20 @@ builder.Services.AddSingleton<CosmosClient>((_) =>
         tokenCredential: credential
     );
     return client;
+});
+
+// Create a single instance of the Kernel to be shared across the application.
+builder.Services.AddSingleton<Kernel>((_) =>
+{
+    IKernelBuilder kernelBuilder = Kernel.CreateBuilder();
+    kernelBuilder.AddAzureOpenAIChatCompletion(
+        deploymentName: builder.Configuration["AzureOpenAI:DeploymentName"]!,
+        endpoint: builder.Configuration["AzureOpenAI:Endpoint"]!,
+        apiKey: builder.Configuration["AzureOpenAI:ApiKey"]!
+    );
+    var databaseService = _.GetRequiredService<IDatabaseService>();
+    kernelBuilder.Plugins.AddFromObject(databaseService);
+    return kernelBuilder.Build();
 });
 
 // Create a single instance of the AzureOpenAIClient to be shared across the application.
@@ -102,13 +123,22 @@ app.MapGet("/Hotels/{hotelId}/Bookings/{min_date}", async (int hotelId, DateTime
     .WithName("GetRecentBookingsForHotel")
     .WithOpenApi();
 
-
 // This endpoint is used to send a message to the Azure OpenAI endpoint.
 app.MapPost("/Chat", async Task<string> (HttpRequest request) =>
 {
     var message = await Task.FromResult(request.Form["message"]);
-    
-    return "This endpoint is not yet available.";
+    var kernel = app.Services.GetRequiredService<Kernel>();
+    var chatCompletionService = kernel.GetRequiredService<IChatCompletionService>();
+    var executionSettings = new OpenAIPromptExecutionSettings
+    {
+        ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions
+    };
+    var response = await chatCompletionService.GetChatMessageContentAsync(
+        message.ToString(), 
+        executionSettings, 
+        kernel
+    );
+    return response?.Content!;
 })
     .WithName("Chat")
     .WithOpenApi();
@@ -127,7 +157,8 @@ app.MapGet("/Vectorize", async (string text, [FromServices] IVectorizationServic
 app.MapPost("/VectorSearch", async ([FromBody] float[] queryVector, [FromServices] IVectorizationService vectorizationService, int max_results = 0, double minimum_similarity_score = 0.8) =>
 {
     // Exercise 3 Task 3 TODO #3: Insert code to call the ExecuteVectorSearch function on the Vectorization Service. Don't forget to remove the NotImplementedException.
-    throw new NotImplementedException();
+    var results = await vectorizationService.ExecuteVectorSearch(queryVector, max_results, minimum_similarity_score);
+    return results;
 })
     .WithName("VectorSearch")
     .WithOpenApi();
